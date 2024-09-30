@@ -88,11 +88,14 @@ def process_query(prompt: str, geojson_data: Dict[str, Any], geojson_structure: 
           if prop.lower() in prompt.lower():
               # Try to extract a value for this property from the query
               words = prompt.lower().split()
-              prop_index = words.index(prop.lower())
-              if prop_index < len(words) - 1:
-                  value = words[prop_index + 1]
-                  count = count_features_by_property(geojson_data, prop, value)
-                  return f"Based on the analysis, there are {count} features where {prop} is {value}."
+              try:
+                  prop_index = words.index(prop.lower())
+                  if prop_index < len(words) - 1:
+                      value = words[prop_index + 1]
+                      count = count_features_by_property(geojson_data, prop, value)
+                      return f"Based on the analysis, there are {count} features where {prop} is {value}."
+              except ValueError:
+                  pass  # Property not found in the query, continue to next property
 
   # If no specific count query is detected, pass the query to Gemini
   chat = model.start_chat(history=[])
@@ -123,12 +126,17 @@ def main():
       if st.button("Load GeoJSON"):
           if url_input:
               with st.spinner("Loading GeoJSON data..."):
-                  async def load_data():
-                      async with aiohttp.ClientSession() as session:
-                          return await fetch_geojson_data(session, url_input)
-                  st.session_state.geojson_data = asyncio.run(load_data())
-                  st.session_state.geojson_structure = analyze_geojson_structure(st.session_state.geojson_data)
-              st.success("GeoJSON data loaded successfully.")
+                  try:
+                      async def load_data():
+                          async with aiohttp.ClientSession() as session:
+                              return await fetch_geojson_data(session, url_input)
+                      st.session_state.geojson_data = asyncio.run(load_data())
+                      st.session_state.geojson_structure = analyze_geojson_structure(st.session_state.geojson_data)
+                      st.success("GeoJSON data loaded successfully.")
+                  except Exception as e:
+                      st.error(f"Failed to load GeoJSON data: {str(e)}")
+                      st.session_state.geojson_data = None
+                      st.session_state.geojson_structure = None
           else:
               st.error("Please specify a valid GeoJSON URL.")
 
@@ -147,8 +155,11 @@ def main():
           
           if st.button("Create Map"):
               with st.spinner("Creating map..."):
-                  folium_map = create_map(st.session_state.geojson_data, center=[center_lat, center_lon], zoom=zoom_level)
-                  folium_static(folium_map, width=700, height=500)
+                  try:
+                      folium_map = create_map(st.session_state.geojson_data, center=[center_lat, center_lon], zoom=zoom_level)
+                      folium_static(folium_map, width=700, height=500)
+                  except Exception as e:
+                      st.error(f"Failed to create map: {str(e)}")
 
   with col2:
       # Chat interface
@@ -164,10 +175,13 @@ def main():
 
           if st.session_state.geojson_data:
               with st.spinner("Processing your query..."):
-                  response = process_query(prompt, st.session_state.geojson_data, st.session_state.geojson_structure)
-              with st.chat_message("assistant"):
-                  st.markdown(response)
-              st.session_state.messages.append({"role": "assistant", "content": response})
+                  try:
+                      response = process_query(prompt, st.session_state.geojson_data, st.session_state.geojson_structure)
+                      with st.chat_message("assistant"):
+                          st.markdown(response)
+                      st.session_state.messages.append({"role": "assistant", "content": response})
+                  except Exception as e:
+                      st.error(f"Failed to process query: {str(e)}")
           else:
               st.error("Please load GeoJSON data before asking questions.")
 
