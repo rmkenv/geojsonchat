@@ -33,158 +33,138 @@ async def fetch_geojson_data(session: aiohttp.ClientSession, api_url: str) -> Di
           return geojson
       return data
 
-def create_map(geojson_data_list: List[Dict[str, Any]], center: List[float], zoom: int = 10) -> folium.Map:
-  """Create a folium map with the provided list of GeoJSON data."""
+def create_map(geojson_data: Dict[str, Any], center: List[float], zoom: int = 10) -> folium.Map:
+  """Create a folium map with the provided GeoJSON data."""
   m = folium.Map(location=center, zoom_start=zoom)
-  for idx, geojson_data in enumerate(geojson_data_list):
-      folium.GeoJson(
-          geojson_data, 
-          name=f"GeoJSON Layer {idx+1}",
-          style_function=lambda feature: {
-              'fillColor': 'green',
-              'color': 'black',
-              'weight': 2,
-              'fillOpacity': 0.7,
-          }
-      ).add_to(m)
+  folium.GeoJson(
+      geojson_data, 
+      name="GeoJSON Layer",
+      style_function=lambda feature: {
+          'fillColor': 'green',
+          'color': 'black',
+          'weight': 2,
+          'fillOpacity': 0.7,
+      }
+  ).add_to(m)
   folium.LayerControl().add_to(m)
   return m
 
-def analyze_geojson(geojson_data_list: List[Dict[str, Any]], query: str) -> str:
-  """Analyze GeoJSON data based on the query."""
-  query_lower = query.lower()
+def analyze_geojson_structure(geojson_data: Dict[str, Any]) -> Dict[str, Any]:
+  """Analyze the structure of the GeoJSON data and return available properties."""
+  all_properties = set()
+  property_types = {}
+  sample_values = {}
   
-  # Identify potential key words in the query
-  count_keywords = ["how many", "count", "number of"]
-  
-  if any(keyword in query_lower for keyword in count_keywords):
-      # This is likely a counting query
-      # Try to identify what we're counting and any potential filters
-      features_to_count = []
-      for geojson in geojson_data_list:
-          features_to_count.extend(geojson.get('features', []))
+  for feature in geojson_data.get('features', []):
+      properties = feature.get('properties', {})
+      all_properties.update(properties.keys())
       
-      # Analyze the properties of the first feature to understand the data structure
-      if features_to_count:
-          sample_properties = features_to_count[0].get('properties', {})
-          property_counts = Counter()
-          
-          for feature in features_to_count:
-              properties = feature.get('properties', {})
-              for key, value in properties.items():
-                  if isinstance(value, (str, int, float)):
-                      property_counts[f"{key}:{value}"] += 1
-          
-          # Find the most common property values that might match the query
-          potential_matches = [item for item, count in property_counts.most_common(5)]
-          
-          # Try to match these with the query
-          for match in potential_matches:
-              if match.lower() in query_lower:
-                  key, value = match.split(':')
-                  count = sum(1 for feature in features_to_count if feature.get('properties', {}).get(key) == value)
-                  return f"Based on the analysis, there are {count} features where {key} is {value}."
-          
-          # If no specific match, return total count
-          return f"The total number of features across all provided GeoJSON datasets is {len(features_to_count)}."
+      for key, value in properties.items():
+          if key not in property_types:
+              property_types[key] = type(value).__name__
+          if key not in sample_values:
+              sample_values[key] = str(value)
   
-  return "I couldn't perform a specific analysis for this query. Please try asking about counts or numbers of specific features or properties in the data."
+  return {
+      "properties": sorted(list(all_properties)),
+      "property_types": property_types,
+      "sample_values": sample_values
+  }
 
-def process_query(prompt: str, geojson_data_list: List[Dict[str, Any]]) -> str:
+def count_features_by_property(geojson_data: Dict[str, Any], property_name: str, property_value: str) -> int:
+  """Count features in the GeoJSON data based on a specific property and value."""
+  count = sum(1 for feature in geojson_data.get('features', [])
+              if str(feature.get('properties', {}).get(property_name, '')).lower() == property_value.lower())
+  return count
+
+def process_query(prompt: str, geojson_data: Dict[str, Any], geojson_structure: Dict[str, Any]) -> str:
   """Process user query using Gemini API and geospatial data."""
-  context = f"You are a geospatial data expert. The user has provided {len(geojson_data_list)} GeoJSON datasets. "
+  context = f"You are a geospatial data expert. The user has provided a GeoJSON dataset with the following properties: {', '.join(geojson_structure['properties'])}. "
   context += "Analyze the query and provide insights based on the geospatial data available."
-  
-  # Prepare a summary of the data for the AI
-  data_summary = []
-  for idx, geojson in enumerate(geojson_data_list):
-      feature_count = len(geojson.get('features', []))
-      if feature_count > 0:
-          sample_properties = geojson['features'][0].get('properties', {})
-          data_summary.append(f"Dataset {idx+1}: {feature_count} features. Sample properties: {list(sample_properties.keys())}")
-  
-  data_summary_str = "\n".join(data_summary)
-  
-  # Perform data analysis
-  analysis_result = analyze_geojson(geojson_data_list, prompt)
 
-  # Prepare the prompt for the AI
-  ai_prompt = f"{context}\n\nData Summary:\n{data_summary_str}\n\nUser query: {prompt}\n\nAnalysis result: {analysis_result}"
+  # Check if the query is about counting
+  if "how many" in prompt.lower() or "count" in prompt.lower():
+      for prop in geojson_structure['properties']:
+          if prop.lower() in prompt.lower():
+              # Try to extract a value for this property from the query
+              words = prompt.lower().split()
+              prop_index = words.index(prop.lower())
+              if prop_index < len(words) - 1:
+                  value = words[prop_index + 1]
+                  count = count_features_by_property(geojson_data, prop, value)
+                  return f"Based on the analysis, there are {count} features where {prop} is {value}."
 
-  # Get response from Gemini
+  # If no specific count query is detected, pass the query to Gemini
   chat = model.start_chat(history=[])
-  response = chat.send_message(ai_prompt)
+  response = chat.send_message(f"{context}\n\nUser query: {prompt}\n\nGeoJSON structure: {json.dumps(geojson_structure)}")
   
-  return f"{response.text}\n\n{analysis_result}"
-
-async def load_geojsons(urls: List[str]) -> List[Dict[str, Any]]:
-  """Load GeoJSON data from multiple URLs asynchronously."""
-  async with aiohttp.ClientSession() as session:
-      tasks = [fetch_geojson_data(session, url) for url in urls if url.strip()]
-      return await asyncio.gather(*tasks)
+  return response.text
 
 def main():
   st.set_page_config(page_title="Geospatial Data Chatbot", layout="wide")
   st.title("Geospatial Data Chatbot")
   
-  # Initialize chat history and geojson data list in session state
+  # Initialize session state
   if "messages" not in st.session_state:
       st.session_state.messages = []
-  if "geojson_data_list" not in st.session_state:
-      st.session_state.geojson_data_list = []
-
-  # Display chat messages from history on app rerun
-  for message in st.session_state.messages:
-      with st.chat_message(message["role"]):
-          st.markdown(message["content"])
+  if "geojson_data" not in st.session_state:
+      st.session_state.geojson_data = None
+  if "geojson_structure" not in st.session_state:
+      st.session_state.geojson_structure = None
 
   # Create two columns
   col1, col2 = st.columns([2, 1])
 
   with col1:
       # GeoJSON input section
-      st.subheader("Enter up to 5 GeoJSON URLs:")
-      url_inputs = [st.text_input(f"GeoJSON URL {i+1}", key=f"url_{i}") for i in range(5)]
+      st.subheader("Enter a GeoJSON URL:")
+      url_input = st.text_input("GeoJSON URL")
 
-      area_of_interest = st.text_input("Enter Area of Interest (Latitude, Longitude)", "39.0, -76.7")
-
-      if st.button("Load GeoJSONs"):
-          valid_urls = [url for url in url_inputs if url.strip()]
-
-          if valid_urls:
+      if st.button("Load GeoJSON"):
+          if url_input:
               with st.spinner("Loading GeoJSON data..."):
-                  st.session_state.geojson_data_list = asyncio.run(load_geojsons(valid_urls))
-              st.success(f"Loaded {len(st.session_state.geojson_data_list)} GeoJSON datasets.")
+                  async def load_data():
+                      async with aiohttp.ClientSession() as session:
+                          return await fetch_geojson_data(session, url_input)
+                  st.session_state.geojson_data = asyncio.run(load_data())
+                  st.session_state.geojson_structure = analyze_geojson_structure(st.session_state.geojson_data)
+              st.success("GeoJSON data loaded successfully.")
           else:
-              st.error("Please specify at least one valid GeoJSON URL.")
+              st.error("Please specify a valid GeoJSON URL.")
+
+      # Display available properties
+      if st.session_state.geojson_structure:
+          st.subheader("Available Properties:")
+          for prop in st.session_state.geojson_structure['properties']:
+              st.write(f"- {prop} (Type: {st.session_state.geojson_structure['property_types'][prop]}, e.g., {st.session_state.geojson_structure['sample_values'][prop]})")
 
       # Visualization section
-      if st.button("Visualize GeoJSONs"):
-          if st.session_state.geojson_data_list and area_of_interest:
-              try:
-                  coords = area_of_interest.split(",")
-                  if len(coords) != 2:
-                      raise ValueError("Invalid coordinates format")
-                  lat, lon = map(float, coords)
-                  center = [lat, lon]
-                  with st.spinner("Creating map..."):
-                      folium_map = create_map(st.session_state.geojson_data_list, center=center)
-                      folium_static(folium_map, width=800, height=600)
-              except ValueError:
-                  st.error("Please enter valid coordinates in the format: Latitude, Longitude")
-          else:
-              st.error("Please load GeoJSON data and specify an area of interest first.")
+      if st.session_state.geojson_data:
+          st.subheader("Visualize GeoJSON")
+          center_lat = st.number_input("Center Latitude", value=39.0)
+          center_lon = st.number_input("Center Longitude", value=-76.7)
+          zoom_level = st.slider("Zoom Level", min_value=1, max_value=18, value=10)
+          
+          if st.button("Create Map"):
+              with st.spinner("Creating map..."):
+                  folium_map = create_map(st.session_state.geojson_data, center=[center_lat, center_lon], zoom=zoom_level)
+                  folium_static(folium_map, width=700, height=500)
 
   with col2:
       # Chat interface
       st.subheader("Chat with the Geospatial Data Expert")
+      if st.session_state.geojson_structure:
+          st.write("You can ask questions about the loaded GeoJSON data. For example:")
+          st.write("- How many features are there where [property] is [value]?")
+          st.write("- What can you tell me about the [property] in this dataset?")
+
       if prompt := st.chat_input("What would you like to know about the geospatial data?"):
           st.chat_message("user").markdown(prompt)
           st.session_state.messages.append({"role": "user", "content": prompt})
 
-          if st.session_state.geojson_data_list:
+          if st.session_state.geojson_data:
               with st.spinner("Processing your query..."):
-                  response = process_query(prompt, st.session_state.geojson_data_list)
+                  response = process_query(prompt, st.session_state.geojson_data, st.session_state.geojson_structure)
               with st.chat_message("assistant"):
                   st.markdown(response)
               st.session_state.messages.append({"role": "assistant", "content": response})
