@@ -93,19 +93,23 @@ def main():
       else:
           st.error("Please specify at least one valid GeoJSON URL.")
 
-  # Visualization section
-  if st.button("Visualize GeoJSONs"):
-      if st.session_state.geojson_data_list and area_of_interest:
-          try:
-              lat, lon = map(float, area_of_interest.split(","))
-              center = [lat, lon]
-              with st.spinner("Creating map..."):
-                  folium_map = create_map(st.session_state.geojson_data_list, center=center)
-                  folium_static(folium_map)
-          except ValueError:
-              st.error("Please enter valid coordinates in the format: Latitude, Longitude")
-      else:
-          st.error("Please load GeoJSON data and specify an area of interest first.")
+# Visualization section
+if st.button("Visualize GeoJSONs"):
+    if st.session_state.geojson_data_list and area_of_interest:
+        try:
+            coords = area_of_interest.split(",")
+            if len(coords) != 2:
+                raise ValueError("Invalid coordinates format")
+            lat, lon = map(float, coords)
+            center = [lat, lon]
+            with st.spinner("Creating map..."):
+                folium_map = create_map(st.session_state.geojson_data_list, center=center)
+                folium_static(folium_map)
+        except ValueError:
+            st.error("Please enter valid coordinates in the format: Latitude, Longitude")
+    else:
+        st.error("Please load GeoJSON data and specify an area of interest first.")
+
 
   # Chat interface
   if prompt := st.chat_input("What would you like to know about the geospatial data?"):
