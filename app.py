@@ -3,6 +3,7 @@ import requests
 import folium
 from streamlit_folium import folium_static
 import google.generativeai as genai
+import json
 
 # Configure Gemini API using Streamlit secrets
 if 'GOOGLE_API_KEY' not in st.secrets:
@@ -16,7 +17,17 @@ def fetch_geojson_data(api_url):
   """Fetch GeoJSON data from a given URL."""
   response = requests.get(api_url)
   response.raise_for_status()
-  return response.json()
+  data = response.json()
+  
+  # Check if the response is in the ArcGIS REST API format
+  if 'features' in data and 'geometryType' in data:
+      # Convert ArcGIS JSON to GeoJSON
+      geojson = {
+          "type": "FeatureCollection",
+          "features": data['features']
+      }
+      return geojson
+  return data
 
 def create_map(geojson_data_list, center, zoom=10):
   """Create a folium map with the provided list of GeoJSON data."""
@@ -31,8 +42,18 @@ def process_query(prompt, geojson_data_list):
   context = f"You are a geospatial data expert. The user has provided {len(geojson_data_list)} GeoJSON datasets. "
   context += "Analyze the query and provide insights based on the geospatial data available."
   
+  # Prepare a summary of the data for the AI
+  data_summary = []
+  for idx, geojson in enumerate(geojson_data_list):
+      feature_count = len(geojson.get('features', []))
+      if feature_count > 0:
+          sample_properties = geojson['features'][0].get('properties', {})
+          data_summary.append(f"Dataset {idx+1}: {feature_count} features. Sample properties: {list(sample_properties.keys())}")
+  
+  data_summary_str = "\n".join(data_summary)
+  
   chat = model.start_chat(history=[])
-  response = chat.send_message(f"{context}\n\nUser query: {prompt}")
+  response = chat.send_message(f"{context}\n\nData Summary:\n{data_summary_str}\n\nUser query: {prompt}")
   return response.text
 
 def main():
@@ -53,7 +74,7 @@ def main():
   st.subheader("Enter up to 5 GeoJSON URLs:")
   url_inputs = [st.text_input(f"GeoJSON URL {i+1}", key=f"url_{i}") for i in range(5)]
 
-  area_of_interest = st.text_input("Enter Area of Interest (Latitude, Longitude)", "0, 0")
+  area_of_interest = st.text_input("Enter Area of Interest (Latitude, Longitude)", "39.0, -76.7")
 
   if st.button("Load GeoJSONs"):
       st.session_state.geojson_data_list = []
@@ -62,8 +83,9 @@ def main():
       if valid_urls:
           for url in valid_urls:
               try:
-                  data = fetch_geojson_data(url)
-                  st.session_state.geojson_data_list.append(data)
+                  with st.spinner(f"Loading data from {url}..."):
+                      data = fetch_geojson_data(url)
+                      st.session_state.geojson_data_list.append(data)
               except requests.exceptions.RequestException as e:
                   st.error(f"Failed to fetch data from {url}: {str(e)}")
           
@@ -77,8 +99,9 @@ def main():
           try:
               lat, lon = map(float, area_of_interest.split(","))
               center = [lat, lon]
-              folium_map = create_map(st.session_state.geojson_data_list, center=center)
-              folium_static(folium_map)
+              with st.spinner("Creating map..."):
+                  folium_map = create_map(st.session_state.geojson_data_list, center=center)
+                  folium_static(folium_map)
           except ValueError:
               st.error("Please enter valid coordinates in the format: Latitude, Longitude")
       else:
@@ -90,7 +113,8 @@ def main():
       st.session_state.messages.append({"role": "user", "content": prompt})
 
       if st.session_state.geojson_data_list:
-          response = process_query(prompt, st.session_state.geojson_data_list)
+          with st.spinner("Processing your query..."):
+              response = process_query(prompt, st.session_state.geojson_data_list)
           with st.chat_message("assistant"):
               st.markdown(response)
           st.session_state.messages.append({"role": "assistant", "content": response})
