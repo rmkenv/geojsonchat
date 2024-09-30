@@ -7,6 +7,7 @@ import json
 from typing import List, Dict, Any
 import asyncio
 import aiohttp
+from collections import Counter
 
 # Configure Gemini API using Streamlit secrets
 if 'GOOGLE_API_KEY' not in st.secrets:
@@ -49,6 +50,46 @@ def create_map(geojson_data_list: List[Dict[str, Any]], center: List[float], zoo
   folium.LayerControl().add_to(m)
   return m
 
+def analyze_geojson(geojson_data_list: List[Dict[str, Any]], query: str) -> str:
+  """Analyze GeoJSON data based on the query."""
+  query_lower = query.lower()
+  
+  # Identify potential key words in the query
+  count_keywords = ["how many", "count", "number of"]
+  
+  if any(keyword in query_lower for keyword in count_keywords):
+      # This is likely a counting query
+      # Try to identify what we're counting and any potential filters
+      features_to_count = []
+      for geojson in geojson_data_list:
+          features_to_count.extend(geojson.get('features', []))
+      
+      # Analyze the properties of the first feature to understand the data structure
+      if features_to_count:
+          sample_properties = features_to_count[0].get('properties', {})
+          property_counts = Counter()
+          
+          for feature in features_to_count:
+              properties = feature.get('properties', {})
+              for key, value in properties.items():
+                  if isinstance(value, (str, int, float)):
+                      property_counts[f"{key}:{value}"] += 1
+          
+          # Find the most common property values that might match the query
+          potential_matches = [item for item, count in property_counts.most_common(5)]
+          
+          # Try to match these with the query
+          for match in potential_matches:
+              if match.lower() in query_lower:
+                  key, value = match.split(':')
+                  count = sum(1 for feature in features_to_count if feature.get('properties', {}).get(key) == value)
+                  return f"Based on the analysis, there are {count} features where {key} is {value}."
+          
+          # If no specific match, return total count
+          return f"The total number of features across all provided GeoJSON datasets is {len(features_to_count)}."
+  
+  return "I couldn't perform a specific analysis for this query. Please try asking about counts or numbers of specific features or properties in the data."
+
 def process_query(prompt: str, geojson_data_list: List[Dict[str, Any]]) -> str:
   """Process user query using Gemini API and geospatial data."""
   context = f"You are a geospatial data expert. The user has provided {len(geojson_data_list)} GeoJSON datasets. "
@@ -64,9 +105,17 @@ def process_query(prompt: str, geojson_data_list: List[Dict[str, Any]]) -> str:
   
   data_summary_str = "\n".join(data_summary)
   
+  # Perform data analysis
+  analysis_result = analyze_geojson(geojson_data_list, prompt)
+
+  # Prepare the prompt for the AI
+  ai_prompt = f"{context}\n\nData Summary:\n{data_summary_str}\n\nUser query: {prompt}\n\nAnalysis result: {analysis_result}"
+
+  # Get response from Gemini
   chat = model.start_chat(history=[])
-  response = chat.send_message(f"{context}\n\nData Summary:\n{data_summary_str}\n\nUser query: {prompt}")
-  return response.text
+  response = chat.send_message(ai_prompt)
+  
+  return f"{response.text}\n\n{analysis_result}"
 
 async def load_geojsons(urls: List[str]) -> List[Dict[str, Any]]:
   """Load GeoJSON data from multiple URLs asynchronously."""
