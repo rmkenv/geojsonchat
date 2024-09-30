@@ -73,14 +73,21 @@ def analyze_geojson_structure(geojson_data: Dict[str, Any]) -> Dict[str, Any]:
 
 def count_features_by_property(geojson_data: Dict[str, Any], property_name: str, property_value: str) -> int:
   """Count features in the GeoJSON data based on a specific property and value."""
-  count = sum(1 for feature in geojson_data.get('features', [])
-              if str(feature.get('properties', {}).get(property_name, '')).lower() == property_value.lower())
+  count = 0
+  for feature in geojson_data.get('features', []):
+      properties = feature.get('properties', {})
+      feature_value = str(properties.get(property_name, '')).lower()
+      if feature_value == property_value.lower():
+          count += 1
   return count
 
 def process_query(prompt: str, geojson_data: Dict[str, Any], geojson_structure: Dict[str, Any]) -> str:
   """Process user query using Gemini API and geospatial data."""
   context = f"You are a geospatial data expert. The user has provided a GeoJSON dataset with the following properties: {', '.join(geojson_structure['properties'])}. "
   context += "Analyze the query and provide insights based on the geospatial data available."
+
+  # Debugging information
+  st.write("Debug: Available properties:", geojson_structure['properties'])
 
   # Check if the query is about counting
   if "how many" in prompt.lower() or "count" in prompt.lower():
@@ -93,6 +100,11 @@ def process_query(prompt: str, geojson_data: Dict[str, Any], geojson_structure: 
                   if prop_index < len(words) - 1:
                       value = words[prop_index + 1]
                       count = count_features_by_property(geojson_data, prop, value)
+                      
+                      # Debugging information
+                      st.write(f"Debug: Counting {prop} = {value}")
+                      st.write(f"Debug: Count result = {count}")
+                      
                       return f"Based on the analysis, there are {count} features where {prop} is {value}."
               except ValueError:
                   pass  # Property not found in the query, continue to next property
@@ -176,6 +188,9 @@ def main():
           if st.session_state.geojson_data:
               with st.spinner("Processing your query..."):
                   try:
+                      # Debugging information
+                      st.write("Debug: Processing query:", prompt)
+                      
                       response = process_query(prompt, st.session_state.geojson_data, st.session_state.geojson_structure)
                       with st.chat_message("assistant"):
                           st.markdown(response)
