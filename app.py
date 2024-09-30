@@ -8,6 +8,8 @@ from typing import List, Dict, Any
 import asyncio
 import aiohttp
 from collections import Counter
+import geopandas as gpd
+from shapely.geometry import shape
 
 # Configure Gemini API using Streamlit secrets
 if 'GOOGLE_API_KEY' not in st.secrets:
@@ -21,23 +23,13 @@ async def fetch_geojson_data(session: aiohttp.ClientSession, api_url: str) -> Di
   """Fetch GeoJSON data from a given URL asynchronously."""
   async with session.get(api_url) as response:
       response.raise_for_status()
-      data = await response.json()
-      
-      # Check if the response is in the ArcGIS REST API format
-      if 'features' in data and 'geometryType' in data:
-          # Convert ArcGIS JSON to GeoJSON
-          geojson = {
-              "type": "FeatureCollection",
-              "features": data['features']
-          }
-          return geojson
-      return data
+      return await response.json()
 
-def create_map(geojson_data: Dict[str, Any], center: List[float], zoom: int = 10) -> folium.Map:
-  """Create a folium map with the provided GeoJSON data."""
+def create_map(gdf: gpd.GeoDataFrame, center: List[float], zoom: int = 10) -> folium.Map:
+  """Create a folium map with the provided GeoDataFrame."""
   m = folium.Map(location=center, zoom_start=zoom)
   folium.GeoJson(
-      geojson_data, 
+      gdf.to_json(),
       name="GeoJSON Layer",
       style_function=lambda feature: {
           'fillColor': 'green',
@@ -49,81 +41,64 @@ def create_map(geojson_data: Dict[str, Any], center: List[float], zoom: int = 10
   folium.LayerControl().add_to(m)
   return m
 
-def analyze_geojson_structure(geojson_data: Dict[str, Any]) -> Dict[str, Any]:
-  """Analyze the structure of the GeoJSON data and return available properties."""
-  all_properties = set()
-  property_types = {}
-  sample_values = {}
-  
-  for feature in geojson_data.get('features', []):
-      properties = feature.get('properties', {})
-      all_properties.update(properties.keys())
-      
-      for key, value in properties.items():
-          if key not in property_types:
-              property_types[key] = type(value).__name__
-          if key not in sample_values:
-              sample_values[key] = str(value)
+def analyze_geojson_structure(gdf: gpd.GeoDataFrame) -> Dict[str, Any]:
+  """Analyze the structure of the GeoDataFrame and return available properties."""
+  properties = gdf.columns.tolist()
+  properties.remove('geometry')
   
   return {
-      "properties": sorted(list(all_properties)),
-      "property_types": property_types,
-      "sample_values": sample_values
+      "properties": properties,
+      "property_types": {prop: str(gdf[prop].dtype) for prop in properties},
+      "sample_values": {prop: str(gdf[prop].iloc[0]) for prop in properties},
+      "feature_count": len(gdf),
+      "geometry_types": gdf.geometry.geom_type.value_counts().to_dict()
   }
 
-def count_features_by_property(geojson_data: Dict[str, Any], property_name: str, property_value: str) -> int:
-  """Count features in the GeoJSON data based on a specific property and value."""
-  count = 0
-  for feature in geojson_data.get('features', []):
-      properties = feature.get('properties', {})
-      feature_value = str(properties.get(property_name, '')).lower()
-      if feature_value == property_value.lower():
-          count += 1
-  return count
-
-def process_query(prompt: str, geojson_data: Dict[str, Any], geojson_structure: Dict[str, Any]) -> str:
+def process_query(prompt: str, gdf: gpd.GeoDataFrame, geojson_structure: Dict[str, Any]) -> str:
   """Process user query using Gemini API and geospatial data."""
-  context = f"You are a geospatial data expert. The user has provided a GeoJSON dataset with the following properties: {', '.join(geojson_structure['properties'])}. "
-  context += "Analyze the query and provide insights based on the geospatial data available."
+  context = (
+      f"You are a geospatial data expert. The user has provided a GeoJSON dataset with the following properties: "
+      f"{', '.join(geojson_structure['properties'])}. "
+      f"The dataset contains {geojson_structure['feature_count']} features with geometry types: {geojson_structure['geometry_types']}. "
+      "Analyze the query and provide insights based on the geospatial data available."
+  )
 
-  # Debugging information
-  st.write("Debug: Available properties:", geojson_structure['properties'])
+  # Prepare some basic statistics
+  stats = {
+      "feature_count": len(gdf),
+      "property_stats": {prop: gdf[prop].value_counts().to_dict() for prop in geojson_structure['properties'] if gdf[prop].dtype in ['object', 'int64', 'float64']}
+  }
 
-  # Check if the query is about counting
-  if "how many" in prompt.lower() or "count" in prompt.lower():
+  # If the query is about counting or statistics
+  if any(keyword in prompt.lower() for keyword in ["how many", "count", "average", "mean", "median", "sum"]):
       for prop in geojson_structure['properties']:
           if prop.lower() in prompt.lower():
-              # Try to extract a value for this property from the query
-              words = prompt.lower().split()
-              try:
-                  prop_index = words.index(prop.lower())
-                  if prop_index < len(words) - 1:
-                      value = words[prop_index + 1]
-                      count = count_features_by_property(geojson_data, prop, value)
-                      
-                      # Debugging information
-                      st.write(f"Debug: Counting {prop} = {value}")
-                      st.write(f"Debug: Count result = {count}")
-                      
-                      return f"Based on the analysis, there are {count} features where {prop} is {value}."
-              except ValueError:
-                  pass  # Property not found in the query, continue to next property
+              if gdf[prop].dtype in ['int64', 'float64']:
+                  stats[f"{prop}_mean"] = gdf[prop].mean()
+                  stats[f"{prop}_median"] = gdf[prop].median()
+                  stats[f"{prop}_sum"] = gdf[prop].sum()
+              value_counts = gdf[prop].value_counts()
+              stats[f"{prop}_top_values"] = value_counts.head().to_dict()
 
-  # If no specific count query is detected, pass the query to Gemini
+  # Pass the query to Gemini along with the context and stats
   chat = model.start_chat(history=[])
-  response = chat.send_message(f"{context}\n\nUser query: {prompt}\n\nGeoJSON structure: {json.dumps(geojson_structure)}")
+  response = chat.send_message(
+      f"{context}\n\nUser query: {prompt}\n\n"
+      f"GeoJSON structure: {json.dumps(geojson_structure)}\n\n"
+      f"Statistics: {json.dumps(stats)}"
+  )
   
   return response.text
 
 def main():
-  st.set_page_config(page_title="Geospatial Data Chatbot", layout="wide")
-  st.title("Geospatial Data Chatbot")
+  st.set_page_config(page_title="GeoJSON Data Explorer", layout="wide")
+  st.title("GeoJSON Data Explorer")
   
   # Initialize session state
   if "messages" not in st.session_state:
       st.session_state.messages = []
-  if "geojson_data" not in st.session_state:
-      st.session_state.geojson_data = None
+  if "gdf" not in st.session_state:
+      st.session_state.gdf = None
   if "geojson_structure" not in st.session_state:
       st.session_state.geojson_structure = None
 
@@ -142,33 +117,37 @@ def main():
                       async def load_data():
                           async with aiohttp.ClientSession() as session:
                               return await fetch_geojson_data(session, url_input)
-                      st.session_state.geojson_data = asyncio.run(load_data())
-                      st.session_state.geojson_structure = analyze_geojson_structure(st.session_state.geojson_data)
+                      geojson_data = asyncio.run(load_data())
+                      st.session_state.gdf = gpd.GeoDataFrame.from_features(geojson_data['features'])
+                      st.session_state.geojson_structure = analyze_geojson_structure(st.session_state.gdf)
                       st.success("GeoJSON data loaded successfully.")
                   except Exception as e:
                       st.error(f"Failed to load GeoJSON data: {str(e)}")
-                      st.session_state.geojson_data = None
+                      st.session_state.gdf = None
                       st.session_state.geojson_structure = None
           else:
               st.error("Please specify a valid GeoJSON URL.")
 
       # Display available properties
       if st.session_state.geojson_structure:
+          st.subheader("Dataset Overview:")
+          st.write(f"Number of features: {st.session_state.geojson_structure['feature_count']}")
+          st.write(f"Geometry types: {st.session_state.geojson_structure['geometry_types']}")
           st.subheader("Available Properties:")
           for prop in st.session_state.geojson_structure['properties']:
               st.write(f"- {prop} (Type: {st.session_state.geojson_structure['property_types'][prop]}, e.g., {st.session_state.geojson_structure['sample_values'][prop]})")
 
       # Visualization section
-      if st.session_state.geojson_data:
+      if st.session_state.gdf is not None:
           st.subheader("Visualize GeoJSON")
-          center_lat = st.number_input("Center Latitude", value=39.0)
-          center_lon = st.number_input("Center Longitude", value=-76.7)
+          center_lat = st.number_input("Center Latitude", value=st.session_state.gdf.total_bounds[1])
+          center_lon = st.number_input("Center Longitude", value=st.session_state.gdf.total_bounds[0])
           zoom_level = st.slider("Zoom Level", min_value=1, max_value=18, value=10)
           
           if st.button("Create Map"):
               with st.spinner("Creating map..."):
                   try:
-                      folium_map = create_map(st.session_state.geojson_data, center=[center_lat, center_lon], zoom=zoom_level)
+                      folium_map = create_map(st.session_state.gdf, center=[center_lat, center_lon], zoom=zoom_level)
                       folium_static(folium_map, width=700, height=500)
                   except Exception as e:
                       st.error(f"Failed to create map: {str(e)}")
@@ -178,20 +157,18 @@ def main():
       st.subheader("Chat with the Geospatial Data Expert")
       if st.session_state.geojson_structure:
           st.write("You can ask questions about the loaded GeoJSON data. For example:")
-          st.write("- How many features are there where [property] is [value]?")
-          st.write("- What can you tell me about the [property] in this dataset?")
+          st.write("- How many features are there in total?")
+          st.write("- What are the most common values for [property]?")
+          st.write("- Can you summarize the data for me?")
 
       if prompt := st.chat_input("What would you like to know about the geospatial data?"):
           st.chat_message("user").markdown(prompt)
           st.session_state.messages.append({"role": "user", "content": prompt})
 
-          if st.session_state.geojson_data:
+          if st.session_state.gdf is not None:
               with st.spinner("Processing your query..."):
                   try:
-                      # Debugging information
-                      st.write("Debug: Processing query:", prompt)
-                      
-                      response = process_query(prompt, st.session_state.geojson_data, st.session_state.geojson_structure)
+                      response = process_query(prompt, st.session_state.gdf, st.session_state.geojson_structure)
                       with st.chat_message("assistant"):
                           st.markdown(response)
                       st.session_state.messages.append({"role": "assistant", "content": response})
